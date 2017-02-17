@@ -3,50 +3,36 @@ from __future__ import absolute_import
 from keras import backend as K
 from keras.engine import InputSpec
 from keras.layers import Wrapper, Merge
+from keras import regularizers, constraints
 
 
 class Residual(Wrapper):
-    """This wrapper automatically applies a residual to a model.
+    """This wrapper automatically applies a (modified) residual to a model.
 
     For an input `x` and a model `F(x)`, the residual wrapper gives the output
-    `y = x + F(x)`. In this configuration, the output of F(x) must have the
-    same shape as x. Other merge modes are supported besides summation.
-
-    ```python
-        input = Input(shape=(5,))
-
-        # Apply the residual normally
-        output1 = Residual(Dense(5), merge_mode='sum')(input)
-
-        # Throws an exception due to mismatching shapes
-        output2 = Residual(Dense(3), merge_mode='sum')(input)
-
-        # Product: `y = x * F(x)`
-        output3 = Residual(Dense(5), merge_mode='mul')(input)
-    ```
-
-    For more modes, see: https://keras.io/layers/core/#merge
-
-    Alternatively, a function which takes the input and the layer output
-    can be passed to define the merge:
-
-    ```python
-        from keras.layers import Merge
-        def diff_merge():  # x_fx = [x, fx]
-            diff = lambda x: x[1] - x[0]
-            return Merge(mode=diff, output_shape=lambda x: x[0])
-
-        # Difference: `y = F(x) - x`
-        output4 = Residual(Dense(5), merge_mode=diff_merge())(input)
-    ```
+    `y = sqrt(p)*F(x) + (1-sqrt(p))*x` with probability sqrt(p).
+    The rationale for this modification is that it combines sampling x ~ X and E[X] in
+    a hypothetical model where the inclusion of a layer is done via a bernoulli RV.
+    In this configuration, the output of F(x) must have the
+    same shape as x. I got rid of the merge mode aspect of this as it doesn't make sense
+    with our reformulation.
 
     Arguments:
         layer: The layer to wrap
-        merge_mode: The merge operation
+        p_regularizer: the regularizer for updating p
+        p_constraint: the constraint for updating p
     """
-    def __init__(self, layer, merge_mode='sum', **kwargs):
-        self.merge_mode = merge_mode
+    def __init__(self, layer, merge_mode='sum',
+                 p_regularizer=None, p_constraint=None,
+                 **kwargs):
         self.supports_masking = True
+        self.p_regularizer=regularizers.get(p_regularizer)
+        self.p_constraint=regularizers.get(p_constraint)
+        layer.add_weight((1,), # 1 new parameter (p)
+                         initializer=layer.init, # make it be initialized according to the same method as the layer
+                         name='{}_W_presnet'.format(layer.name), # make it be named the same as the layer but with resnet
+                         regularizer=self.p_regularizer,
+                         constraint=self.p_constraint)
         super(Residual, self).__init__(layer, **kwargs)
 
     def build(self, input_shape):
@@ -65,11 +51,11 @@ class Residual(Wrapper):
     def get_output_shape_for(self, input_shape):
         return input_shape
 
-    def call(self, x, mask=None):
+    def call(self, x, mask=None, seed=None):
         layer_output = self.layer.call(x, mask)
-        if isinstance(self.merge_mode, str):
-            self.merge_mode = Merge(mode=self.merge_mode)
-        output = self.merge_mode([x, layer_output])
+        ptrue = K.sqrt(K.sigmoid(p))
+        resout = (1-ptrue)*layer_output + ptrue*x 
+        output = K.in_train_phase(K.switch(K.random_binomial((1,), p=ptrue, seed=seed), x, resout), resout)
         return output
     
     @classmethod
