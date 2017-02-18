@@ -46,7 +46,7 @@ class ResMerge(Merge):
         ptrue = K.sqrt(K.sigmoid(self.p))
         split = K.tile(ptrue, self.dims)
         resout = split*x + (1-split)*y
-        sample = K.tile(K.in_train_phase(K.random_binomial((1,), p=ptrue), 0), self.dims)
+        sample = K.tile(K.in_train_phase(K.random_binomial((1,), p=ptrue), K.zeros((1,))), self.dims)
         output = sample*x + (1-sample)*resout
         return output
 
