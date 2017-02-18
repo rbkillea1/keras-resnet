@@ -4,6 +4,9 @@ from keras import backend as K
 from keras.engine import InputSpec
 from keras.layers import Wrapper, Merge
 from keras import regularizers, constraints, initializations
+import theano
+
+first_res = True
 
 class ResMerge(Merge):
     def __init__(self, dims, p=None,
@@ -40,6 +43,8 @@ class ResMerge(Merge):
                                      regularizer=regularizers.get(None),
                                      constraint=constraints.get(None))
         self.arguments = {}
+        self.first_res = first_res
+        first_res = False
 
     def resmerge(self, inputs, **kwargs):
         x, y = inputs[0], inputs[1]
@@ -47,7 +52,9 @@ class ResMerge(Merge):
         split = K.tile(ptrue, self.dims)
         resout = split*x + (1-split)*y
         sample = K.tile(K.in_train_phase(K.random_binomial((1,), p=ptrue), K.zeros((1,))), self.dims)
-        output = sample*x + (1-sample)*resout
+        output = K.switch(sample, x, resout)
+        if self.first_res:
+            print(K.value(self.p))
         return output
 
 class Residual(Wrapper):
