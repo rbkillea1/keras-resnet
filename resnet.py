@@ -3,8 +3,52 @@ from __future__ import absolute_import
 from keras import backend as K
 from keras.engine import InputSpec
 from keras.layers import Wrapper, Merge
-from keras import regularizers, constraints
+from keras import regularizers, constraints, initializations
 
+class ResMerge(Merge):
+    def __init__(self, dims, p=None,
+                 concat_axis=-1,
+                 dot_axes=-1, output_shape=None, output_mask=None,
+                 arguments=None, node_indices=None, tensor_indices=None,
+                 name=None, **kwargs):
+        super(Merge, self).__init__(**kwargs)
+        self.mode=self.resmerge
+        self.concat_axis = concat_axis
+        self.dot_axes = dot_axes
+        self._output_shape = output_shape
+        self.node_indices = node_indices
+        self._output_mask = output_mask
+        self.arguments = arguments if arguments else {}
+
+        # Layer parameters.
+        self.inbound_nodes = []
+        self.outbound_nodes = []
+        self.constraints = {}
+        self._trainable_weights = []
+        self._non_trainable_weights = []
+        self.supports_masking = True
+        self.uses_learning_phase = False
+        self.input_spec = None  # Compatible with anything.
+        if not name:
+            prefix = self.__class__.__name__.lower()
+            name = prefix + '_' + str(K.get_uid(prefix))
+        self.dims = dims
+        if not p:
+            self.p = self.add_weight((1,),
+                                     initializer='uniform',
+                                     name='{}_p'.format(self.name),
+                                     regularizer=regularizers.get(None),
+                                     constraint=constraints.get(None))
+        self.arguments = {}
+
+    def resmerge(self, inputs, **kwargs):
+        x, y = inputs[0], inputs[1]
+        ptrue = K.sqrt(K.sigmoid(self.p))
+        split = K.tile(ptrue, self.dims)
+        resout = split*x + (1-split)*y
+        sample = K.tile(K.in_train_phase(K.random_binomial((1,), p=ptrue), 0), self.dims)
+        output = sample*x + (1-sample)*resout
+        return output
 
 class Residual(Wrapper):
     """This wrapper automatically applies a (modified) residual to a model.
@@ -22,17 +66,10 @@ class Residual(Wrapper):
         p_regularizer: the regularizer for updating p
         p_constraint: the constraint for updating p
     """
-    def __init__(self, layer, merge_mode='sum',
-                 p_regularizer=None, p_constraint=None,
+    def __init__(self, layer, p=None,
                  **kwargs):
-        self.supports_masking = True
-        self.p_regularizer=regularizers.get(p_regularizer)
-        self.p_constraint=regularizers.get(p_constraint)
-        layer.add_weight((1,), # 1 new parameter (p)
-                         initializer=layer.init, # make it be initialized according to the same method as the layer
-                         name='{}_W_presnet'.format(layer.name), # make it be named the same as the layer but with resnet
-                         regularizer=self.p_regularizer,
-                         constraint=self.p_constraint)
+        self.layer = layer
+        self.p = p
         super(Residual, self).__init__(layer, **kwargs)
 
     def build(self, input_shape):
@@ -47,28 +84,28 @@ class Residual(Wrapper):
             self.layer.built = True
         self.input_spec = [InputSpec(shape=input_shape)]
         super(Residual, self).build()
-
+        self.res = None
+        
     def get_output_shape_for(self, input_shape):
         return input_shape
-
-    def call(self, x, mask=None, seed=None):
+    
+    def call(self, x, mask=None):
         layer_output = self.layer.call(x, mask)
-        ptrue = K.sqrt(K.sigmoid(p))
-        resout = (1-ptrue)*layer_output + ptrue*x 
-        output = K.in_train_phase(K.switch(K.random_binomial((1,), p=ptrue, seed=seed), x, resout), resout)
-        return output
+        if not self.res:
+            self.res = ResMerge(dims=self.layer.get_output_shape_for(x.shape), p=self.p)
+        return self.res([layer_output, x])
     
     @classmethod
     def from_config(cls, config):
         from keras.utils.layer_utils import layer_from_config
-        merge_mode = layer_from_config(config.pop('merge_mode'))
+        self.res = layer_from_config(config.pop('res'))
+        self.p = res.p
         residual = super(Residual, cls).from_config(config)
-        residual.merge_mode = merge_mode
         return residual
     
     def get_config(self):
-        config = {"merge_mode": {'class_name': 'Merge',
-                                 'config': self.merge_mode.get_config()}}
+        config = {"ResMerge": {'class_name': 'ResMerge',
+                               'config': self.res.get_config()}}
         base_config = super(Residual, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
 
